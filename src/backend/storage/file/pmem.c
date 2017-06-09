@@ -7,58 +7,79 @@
 #ifdef HAVE_PMEM
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include <libpmem.h>
 #include <sys/mman.h>
+#include <string.h>
 
 int 
 PmemFileOpen(char *pathname, int flags, int mode, size_t fsize, void **addr)
 {
 	int mapped_flag = 0;
 	int is_pmem = 0;
-	size_t mapped_len, size = 0;
+	size_t mapped_len = 0, size = 0;
+	struct stat	fstat;
+	void *ret_addr;
 
 	Assert(addr);
 
 	/* non-zero 'len' not allowed without PMEM_FILE_CREATE */
-	if ( flags & O_CREAT ) 
+	if (stat(pathname, &fstat) == 0)
 	{
-		mapped_flag |= PMEM_FILE_CREATE;
-		size = fsize;
+		if ((flags & O_CREAT) && (flags & O_EXCL))
+		{
+			errno = EEXIST;
+			return -1;
+		}
 	}
-		
-	if ( flags & O_EXCL ) 
-		mapped_flag |= PMEM_FILE_EXCL; // Ensure create file ;; EEXIST
+	else if (errno == ENOENT) {
+		if (flags & O_CREAT) 
+		{
+			mapped_flag = PMEM_FILE_CREATE;
+			size = fsize;
+		}
+		else {
+			errno = ENOENT;
+			return -1;
+		}
 
-	*addr = NULL;
-	*addr = pmem_map_file(pathname, size, flags, mode,  &mapped_len, &is_pmem);
+		if ( flags & O_EXCL ) 
+			mapped_flag |= PMEM_FILE_EXCL;
+	}
+	else
+		return -1;
 
-	if (!is_pmem)
-		ereport(NOTICE, 
-				(errmsg("xlog file [%s] dosen't consist of persistent memory.", 
-								pathname)));
+	errno = 0;
+	ret_addr = pmem_map_file(pathname, size, mapped_flag, mode,  &mapped_len, &is_pmem);
 
-	if (mapped_len == fsize)
+	if (is_pmem == 0) {
+		ereport(LOG, 
+				(errmsg("xlog file [%s][%p] dosen't consist of persistent memory.", 
+								pathname, ret_addr)));
+	}
+
+	if (fsize == mapped_len)
 	{
-		if ( flags & O_CREAT )
-			if ( msync(*addr, mapped_len, MS_SYNC) )
+		if ( mapped_flag & PMEM_FILE_CREATE )
+			if ( msync(ret_addr, mapped_len, MS_SYNC) )
 				ereport(PANIC,
 						(errcode_for_file_access(),
 						 errmsg("could not msync log file %s: %m", pathname)));
 
+		*addr = ret_addr;
 		return NO_FD_FOR_MAPPED_FILE;
 	}
 
-	ereport(NOTICE, 
-			(errmsg("xlog file [%s] couldn't mapped on persistent memory.", 
-							pathname)));
+	ereport(LOG, 
+			(errmsg("xlog file [%s(file_len=%d; mapped_len=%d)] couldn't mapped on persistent memory.", 
+							pathname, fsize, (int)mapped_len)));
 
-	if (*addr)
-	{
-		pmem_unmap(addr, mapped_len);
-		*addr = NULL;
-	}
+	if (ret_addr != NULL)
+		pmem_unmap(ret_addr, mapped_len);
 
+	ereport(LOG, 
+			(errmsg("xlog file [%s] was basic opened.", pathname)));
 	return BasicOpenFile(pathname, flags, mode);
 }
 

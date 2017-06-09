@@ -2343,9 +2343,9 @@ do_XLogFileOpen(char *pathname, int flags, int mode, void **addr)
 	if (!addr)
 		return BasicOpenFile(pathname, flags, mode);
 
-	if (*addr && sync_method == SYNC_METHOD_PMEM_DRAIN) {
+	if ( sync_method == SYNC_METHOD_PMEM_DRAIN) {
 		int ret = PmemFileOpen(pathname, flags, mode, XLogSegSize, addr);
-		if ( addr )
+		if ( *addr != NULL )
 			return NO_FD_FOR_MAPPED_FILE;
 		else
 			return ret;
@@ -2501,7 +2501,7 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			/* Need to seek in the file? */
 			if (openLogOff != startoffset)
 			{
-				if (!mappedLogFileAddr)
+				if (mappedLogFileAddr == NULL)
 					if (lseek(openLogFile, (off_t) startoffset, SEEK_SET) < 0)
 						ereport(PANIC,
 								(errcode_for_file_access(),
@@ -2519,7 +2519,7 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			{
 				errno = 0;
 				pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
-				if (mappedLogFileAddr)
+				if (mappedLogFileAddr != NULL)
 				{
 					/* NOTE: This method */
 					PmemFileWrite((char *)mappedLogFileAddr+openLogOff, from, nleft);
@@ -2527,6 +2527,7 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 					break;
 				}
 				written = write(openLogFile, from, nleft);
+				elog(NOTICE, "xlog.c XLogWrite 2530 - write"); // for debug
 				pgstat_report_wait_end();
 				if (written <= 0)
 				{
@@ -3279,7 +3280,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock, void **addr)
 	for (nbytes = 0; nbytes < XLogSegSize; nbytes += XLOG_BLCKSZ)
 	{
 		pgstat_report_wait_start(WAIT_EVENT_WAL_INIT_WRITE);
-		if (tmpaddr)
+		if (tmpaddr != NULL)
 		{
 			PmemFileWrite((char *)tmpaddr+nbytes, zbuffer, XLOG_BLCKSZ);
 		}
@@ -3289,6 +3290,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock, void **addr)
 			if ((int) write(fd, zbuffer, XLOG_BLCKSZ) != (int) XLOG_BLCKSZ)
 			{
 				int			save_errno = errno;
+				elog(NOTICE, "xlog.c XLogFileInit 3293 - write"); // for debug
 
 				/*
 				 * If we fail to make the file, delete it to release disk space
@@ -3463,6 +3465,7 @@ XLogFileCopy(XLogSegNo destsegno, TimeLineID srcTLI, XLogSegNo srcsegno,
 		if ((int) write(fd, buffer, sizeof(buffer)) != (int) sizeof(buffer))
 		{
 			int			save_errno = errno;
+			elog(NOTICE, "xlog.c XLogFileCopy 3468 - write"); // for debug
 
 			/*
 			 * If we fail to make the file, delete it to release disk space
@@ -5161,12 +5164,14 @@ BootStrapXLOG(void)
 	pgstat_report_wait_start(WAIT_EVENT_WAL_BOOTSTRAP_WRITE);
 
 	/* The follow line is written by yoshimi. */
-	if (mappedLogFileAddr)
+	if (mappedLogFileAddr != NULL)
 	{
 		PmemFileWrite(mappedLogFileAddr, page, XLOG_BLCKSZ);
 	}
 	else if (write(openLogFile, page, XLOG_BLCKSZ) != XLOG_BLCKSZ)
 	{
+		elog(NOTICE, "xlog.c BootStrapXLOG 5173 - write"); // for debug
+
 		/* if write didn't set errno, assume problem is no disk space */
 		if (errno == 0)
 			errno = ENOSPC;
@@ -11668,6 +11673,7 @@ retry:
 		if (read(readFile, readBuf, XLOG_BLCKSZ) != XLOG_BLCKSZ)
 		{
 			char		fname[MAXFNAMELEN];
+			elog(NOTICE, "xlog.c XLogPageRead %d - read", __LINE__); // for debug
 
 			pgstat_report_wait_end();
 			XLogFileName(fname, curFileTLI, readSegNo);
